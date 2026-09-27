@@ -35,8 +35,8 @@ final class Engine
         if (!in_array($missingPolicy, [self::MISSING_THROW, self::MISSING_EMPTY, self::MISSING_KEEP], true)) {
             throw new \InvalidArgumentException('未知的缺失变量策略: ' . $missingPolicy);
         }
-        if ($maxDepth < 1) {
-            throw new \InvalidArgumentException('maxDepth 必须 >= 1');
+        if ($maxDepth < 0) {
+            throw new \InvalidArgumentException('maxDepth 必须 >= 0');
         }
 
         $this->dir = rtrim($templateDir, "/\\");
@@ -62,16 +62,42 @@ final class Engine
     /** 渲染模板目录下的一个模板。 */
     public function render(string $template, array $vars = []): string
     {
-        return $this->renderSource($this->load($template), $vars, 0);
+        return $this->renderTemplate($template, $vars, 0, [], 0);
     }
 
     /** 渲染一段模板源码。 */
     public function renderString(string $source, array $vars = []): string
     {
-        return $this->renderSource($source, $vars, 0);
+        return $this->renderSource($source, $vars, 0, []);
     }
 
-    private function renderSource(string $source, array $vars, int $depth): string
+    private function renderTemplate(
+        string $template,
+        array $vars,
+        int $depth,
+        array $stack,
+        int $line
+    ): string {
+        if ($depth > $this->maxDepth) {
+            throw new TplError('include 嵌套深度超过上限: ' . $this->maxDepth, 'depth', $line);
+        }
+
+        [$path, $source] = $this->load($template, $line);
+        $key = realpath($path);
+        if ($key === false) {
+            $key = $path;
+        }
+
+        if (in_array($key, $stack, true)) {
+            throw new TplError('检测到循环 include: ' . $template, 'cycle', $line);
+        }
+
+        $stack[] = $key;
+
+        return $this->renderSource($source, $vars, $depth, $stack);
+    }
+
+    private function renderSource(string $source, array $vars, int $depth, array $stack): string
     {
         $nodes = Parser::parse($source);
         $out = '';
@@ -83,8 +109,13 @@ final class Engine
             }
 
             if ($node['type'] === 'include') {
-                $src = $this->load($node['name']);
-                $out .= $this->renderSource($src, $vars, $depth + 1);
+                $out .= $this->renderTemplate(
+                    (string) $node['name'],
+                    $vars,
+                    $depth + 1,
+                    $stack,
+                    (int) $node['line']
+                );
                 continue;
             }
 
@@ -98,6 +129,8 @@ final class Engine
                     $out .= $node['text'];
                     continue;
                 }
+
+                throw new TplError('找不到变量: ' . $node['expr'], 'missing', (int) $node['line']);
             }
 
             $text = $this->stringify($value);
@@ -107,19 +140,19 @@ final class Engine
         return $out;
     }
 
-    private function load(string $name): string
+    private function load(string $name, int $line): array
     {
         $path = $this->dir . '/' . $name;
         if (!is_file($path)) {
-            throw new TplError('找不到模板片段: ' . $name, 'include', 0);
+            throw new TplError('找不到模板片段: ' . $name, 'include', $line);
         }
 
         $source = file_get_contents($path);
         if ($source === false) {
-            throw new TplError('无法读取模板片段: ' . $name, 'include', 0);
+            throw new TplError('无法读取模板片段: ' . $name, 'include', $line);
         }
 
-        return $source;
+        return [$path, $source];
     }
 
     /**
@@ -129,48 +162,27 @@ final class Engine
      */
     private function lookup(array $vars, string $expr): array
     {
-        if (array_key_exists($expr, $vars)) {
-            return [true, $vars[$expr]];
-        }
-
-        $flat = str_replace('.', '', $expr);
-        if ($flat !== $expr && array_key_exists($flat, $vars)) {
-            return [true, $vars[$flat]];
-        }
-
         $cur = $vars;
-        foreach (explode('.', $expr) as $seg) {
-            if ($seg === 'length') {
+        $segments = explode('.', $expr);
+        $last = count($segments) - 1;
+
+        foreach ($segments as $index => $seg) {
+            if ($index === $last && $seg === 'length') {
                 if (is_array($cur)) {
-                    $cur = count($cur);
-                    continue;
+                    return [true, count($cur)];
                 }
                 if (is_string($cur)) {
-                    $cur = strlen($cur);
-                    continue;
-                }
-            }
-
-            if (ctype_digit($seg)) {
-                if (is_object($cur) && is_callable([$cur, $seg])) {
-                    $cur = $cur->{$seg}();
-                    continue;
+                    return [true, strlen($cur)];
                 }
 
                 return [false, null];
             }
 
-            if (is_array($cur) && array_key_exists($seg, $cur)) {
-                $cur = $cur[$seg];
-                continue;
+            if (!is_array($cur) || !array_key_exists($seg, $cur)) {
+                return [false, null];
             }
 
-            if (is_object($cur) && method_exists($cur, $seg)) {
-                $cur = $cur->{$seg}();
-                continue;
-            }
-
-            return [false, null];
+            $cur = $cur[$seg];
         }
 
         return [true, $cur];

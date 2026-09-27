@@ -69,20 +69,26 @@ final class Parser
                 continue;
             }
 
-            $close = strpos($source, '}}', $open + 2);
-            if ($close === false) {
-                throw new TplError('未闭合的占位符 {{', 'syntax', self::lineAt($source, $open));
+            $raw = $open + 2 < $len && $source[$open + 2] === '{';
+            if ($raw) {
+                $close = strpos($source, '}}}', $open + 3);
+                if ($close === false) {
+                    throw new TplError('未闭合的占位符 {{{', 'syntax', self::lineAt($source, $open));
+                }
+
+                $innerStart = $open + 3;
+                $end = $close + 3;
+            } else {
+                $close = strpos($source, '}}', $open + 2);
+                if ($close === false) {
+                    throw new TplError('未闭合的占位符 {{', 'syntax', self::lineAt($source, $open));
+                }
+
+                $innerStart = $open + 2;
+                $end = $close + 2;
             }
 
-            $inner = substr($source, $open + 2, $close - ($open + 2));
-            $raw = false;
-            if (str_starts_with($inner, '{')) {
-                $raw = true;
-                $inner = substr($inner, 1);
-            }
-            $end = $close + 2;
-
-            $expr = trim($inner);
+            $expr = trim(substr($source, $innerStart, $close - $innerStart));
             if ($expr === '') {
                 throw new TplError('占位符内容为空', 'syntax', self::lineAt($source, $open));
             }
