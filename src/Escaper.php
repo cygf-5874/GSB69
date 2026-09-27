@@ -14,6 +14,6 @@ final class Escaper
 {
     public static function html(string $value): string
     {
-        return htmlspecialchars($value, ENT_COMPAT, 'UTF-8');
+        return htmlspecialchars($value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
     }
 }

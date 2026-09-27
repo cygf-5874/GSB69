@@ -62,16 +62,17 @@ final class Engine
     /** 渲染模板目录下的一个模板。 */
     public function render(string $template, array $vars = []): string
     {
-        return $this->renderSource($this->load($template), $vars, 0);
+        $path = $this->resolve($template);
+        return $this->renderSource($this->read($path, $template), $vars, 0, [$path]);
     }
 
     /** 渲染一段模板源码。 */
     public function renderString(string $source, array $vars = []): string
     {
-        return $this->renderSource($source, $vars, 0);
+        return $this->renderSource($source, $vars, 0, []);
     }
 
-    private function renderSource(string $source, array $vars, int $depth): string
+    private function renderSource(string $source, array $vars, int $depth, array $stack): string
     {
         $nodes = Parser::parse($source);
         $out = '';
@@ -83,8 +84,24 @@ final class Engine
             }
 
             if ($node['type'] === 'include') {
-                $src = $this->load($node['name']);
-                $out .= $this->renderSource($src, $vars, $depth + 1);
+                $path = $this->resolve($node['name']);
+                if (in_array($path, $stack, true)) {
+                    throw new TplError(
+                        '检测到循环引用: ' . $node['name'],
+                        'cycle',
+                        (int) $node['line']
+                    );
+                }
+                $nextDepth = $depth + 1;
+                if ($nextDepth > $this->maxDepth) {
+                    throw new TplError(
+                        '片段嵌套深度超过上限 ' . $this->maxDepth . ': ' . $node['name'],
+                        'depth',
+                        (int) $node['line']
+                    );
+                }
+                $stack[] = $path;
+                $out .= $this->renderSource($this->read($path, $node['name']), $vars, $nextDepth, $stack);
                 continue;
             }
 
@@ -98,6 +115,12 @@ final class Engine
                     $out .= $node['text'];
                     continue;
                 }
+
+                throw new TplError(
+                    '缺失变量: ' . $node['expr'],
+                    'missing',
+                    (int) $node['line']
+                );
             }
 
             $text = $this->stringify($value);
@@ -107,13 +130,28 @@ final class Engine
         return $out;
     }
 
-    private function load(string $name): string
+    private function resolve(string $name): string
     {
+        if ($name === '' || str_starts_with($name, '/') || str_contains($name, "\0")) {
+            throw new TplError('非法的片段名: ' . $name, 'include', 0);
+        }
+
+        foreach (explode('/', $name) as $seg) {
+            if ($seg === '..') {
+                throw new TplError('片段路径不允许跳出模板目录: ' . $name, 'include', 0);
+            }
+        }
+
         $path = $this->dir . '/' . $name;
         if (!is_file($path)) {
             throw new TplError('找不到模板片段: ' . $name, 'include', 0);
         }
 
+        return $path;
+    }
+
+    private function read(string $path, string $name): string
+    {
         $source = file_get_contents($path);
         if ($source === false) {
             throw new TplError('无法读取模板片段: ' . $name, 'include', 0);
@@ -129,31 +167,13 @@ final class Engine
      */
     private function lookup(array $vars, string $expr): array
     {
-        if (array_key_exists($expr, $vars)) {
-            return [true, $vars[$expr]];
-        }
-
-        $flat = str_replace('.', '', $expr);
-        if ($flat !== $expr && array_key_exists($flat, $vars)) {
-            return [true, $vars[$flat]];
-        }
-
         $cur = $vars;
-        foreach (explode('.', $expr) as $seg) {
+        $segments = explode('.', $expr);
+        $last = count($segments) - 1;
+        foreach ($segments as $i => $seg) {
             if ($seg === 'length') {
-                if (is_array($cur)) {
-                    $cur = count($cur);
-                    continue;
-                }
-                if (is_string($cur)) {
-                    $cur = strlen($cur);
-                    continue;
-                }
-            }
-
-            if (ctype_digit($seg)) {
-                if (is_object($cur) && is_callable([$cur, $seg])) {
-                    $cur = $cur->{$seg}();
+                if ($i === $last && (is_array($cur) || is_string($cur))) {
+                    $cur = is_array($cur) ? count($cur) : strlen($cur);
                     continue;
                 }
 
@@ -162,11 +182,6 @@ final class Engine
 
             if (is_array($cur) && array_key_exists($seg, $cur)) {
                 $cur = $cur[$seg];
-                continue;
-            }
-
-            if (is_object($cur) && method_exists($cur, $seg)) {
-                $cur = $cur->{$seg}();
                 continue;
             }
 

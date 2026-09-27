@@ -69,18 +69,20 @@ final class Parser
                 continue;
             }
 
-            $close = strpos($source, '}}', $open + 2);
+            $raw = ($open + 2 < $len) && $source[$open + 2] === '{';
+            $closeTag = $raw ? '}}}' : '}}';
+            $close = strpos($source, $closeTag, $open + 2);
             if ($close === false) {
-                throw new TplError('未闭合的占位符 {{', 'syntax', self::lineAt($source, $open));
+                throw new TplError(
+                    $raw ? '未闭合的占位符 {{{' : '未闭合的占位符 {{',
+                    'syntax',
+                    self::lineAt($source, $open)
+                );
             }
 
-            $inner = substr($source, $open + 2, $close - ($open + 2));
-            $raw = false;
-            if (str_starts_with($inner, '{')) {
-                $raw = true;
-                $inner = substr($inner, 1);
-            }
-            $end = $close + 2;
+            $innerOffset = $open + 2 + ($raw ? 1 : 0);
+            $inner = substr($source, $innerOffset, $close - $innerOffset);
+            $end = $close + strlen($closeTag);
 
             $expr = trim($inner);
             if ($expr === '') {
